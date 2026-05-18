@@ -1,0 +1,9 @@
+.claude
+datasets
+logs
+pykt-baselines
+results
+results_old
+tmp_analysis
+__pycache__/
+venv

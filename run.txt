@@ -1,0 +1,151 @@
+# ============================================================
+# 运行示例
+# ============================================================
+
+# 1. 基础运行 (random 策略)
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 8 \
+  --fewshot_strategy random \
+  --eval_strategy simple \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# 2. 使用 knowledge_graph 策略 + 默认知识图谱
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 8 \
+  --fewshot_strategy knowledge_graph \
+  --eval_strategy simple \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# 3. 使用 knowledge_graph 策略 + 指定知识图谱文件 (correctness:sequence = 1:0)
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode sparse \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 16 \
+  --fewshot_strategy knowledge_graph \
+  --knowledge_graph_path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness1.0_sequence0.0.json \
+  --eval_strategy simple \
+  --test_num 10 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# 4. 使用 knowledge_graph 策略 + 指定知识图谱文件 (correctness:sequence = 0.5:0.5)
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 8 \
+  --fewshot_strategy knowledge_graph \
+  --knowledge_graph_path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness0.5_sequence0.5.json \
+  --eval_strategy simple \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# 5. 使用 knowledge_graph 策略 + 指定知识图谱文件 (correctness:sequence = 0:1)
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 8 \
+  --fewshot_strategy knowledge_graph \
+  --knowledge_graph_path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness0.0_sequence1.0.json \
+  --eval_strategy simple \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# 6. 使用 concept_based 策略
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 8 \
+  --fewshot_strategy concept_based \
+  --eval_strategy simple \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain
+
+# ============================================================
+# 断点续跑说明
+# ============================================================
+# 中断后重新运行相同命令即可自动续跑
+# 系统会自动跳过已完成的学生
+
+# 结果文件路径格式:
+# results/{model_name}/{data_mode}/{fewshot_strategy}/{dataset_name}/{config}.json
+#
+# 例如:
+# results/gpt-3.5-turbo/moderate/knowledge_graph/MOOCRadar/llm_gpt-3.5-turbo_fsn8_fssknowledge_graph_correctness1.0_sequence0.0_essimple.json
+# results/gpt-3.5-turbo/moderate/random/MOOCRadar/llm_gpt-3.5-turbo_fsn8_fssrandom_essimple.json
+
+# ============================================================
+# 知识图谱生成
+# ============================================================
+# 生成知识图谱 (correctness:sequence = 1:0)
+python -m generate_knowledge_graph.knowledge_graph_builder_new \
+  --data-path ./datasets/moderate/MOOCRadar \
+  --output-path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness1.0_sequence0.0.json \
+  --data-mode moderate \
+  --min-edge-weight 2 \
+  --sequence-scale 0.0 \
+  --exclude-first-n-students 10
+
+# 生成知识图谱 (correctness:sequence = 0.5:0.5)
+python -m generate_knowledge_graph.knowledge_graph_builder_new \
+  --data-path ./datasets/moderate/MOOCRadar \
+  --output-path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness0.5_sequence0.5.json \
+  --data-mode moderate \
+  --min-edge-weight 2 \
+  --sequence-scale 0.5 \
+  --exclude-first-n-students 10
+
+# 生成知识图谱 (correctness:sequence = 0:1)
+python -m generate_knowledge_graph.knowledge_graph_builder_new \
+  --data-path ./datasets/moderate/MOOCRadar \
+  --output-path ./datasets/moderate/MOOCRadar/knowledge_graph_correctness0.0_sequence1.0.json \
+  --data-mode moderate \
+  --min-edge-weight 2 \
+  --sequence-scale 1.0 \
+  --exclude-first-n-students 10

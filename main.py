@@ -31,6 +31,8 @@ def get_args():
     parser.add_argument('--test_num', type=int, default=20, help='test number')
     # random seed
     parser.add_argument('--random_seed', type=int, default=42, help='random seed')
+    # concurrent workers
+    parser.add_argument('--workers', type=int, default=4, help='number of concurrent workers for student processing, set to 1 for sequential')
 
     # llm fewshot settings
     parser.add_argument('--fewshot_num', type=int, default=4, help='fewshot num, 0 means zero-shot')
@@ -102,6 +104,7 @@ def main(args):
                               skip_post_explain=args.skip_post_explain,
                               dataset_name=args.dataset_name,
                               knowledge_graph_path=args.knowledge_graph_path,
+                              max_workers=args.workers,
                               )
     print(f"[STEP 6] Pipeline running...", flush=True)
     llm_pipline.run()

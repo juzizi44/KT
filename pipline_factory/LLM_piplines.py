@@ -7,6 +7,8 @@ from evaluator_factory import LLMEvaluator
 from utils import aggregate_data
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 '''
 For student in train_data:
@@ -36,6 +38,7 @@ class LLMPipeline(Pipeline):
                  skip_post_explain: bool = False,
                  dataset_name: str = None,
                  knowledge_graph_path: str = None,
+                 max_workers: int = 4,
                  ):
         self.model_name = model_name
         self.train_data = train_data
@@ -57,6 +60,8 @@ class LLMPipeline(Pipeline):
         self.random_seed = random_seed
         self.dataset_name = dataset_name
         self.knowledge_graph_path = knowledge_graph_path
+        self.max_workers = max_workers
+        self._results_lock = threading.Lock()
 
 
     def init_llm(self, model_name):
@@ -142,77 +147,41 @@ class LLMPipeline(Pipeline):
             students_to_process.append((i, student_info))
 
         self.logger.write(f"[INFO] Total students to process: {len(students_to_process)} / {len(selected_train)}")
+        self.logger.write(f"[INFO] Using {self.max_workers} workers for concurrent student processing")
 
-        # start evaluation, each iteration returns a dict of eval results for one student
-        for idx, (i, student_info) in enumerate(students_to_process):
-            student_id = str(student_info['student_id'])
-            print(f"[EVAL {idx+1}/{len(students_to_process)}] student {student_id}", flush=True)
-            self.logger.write(f"----------------Evaluating student {student_id}")
-            test_rows = test_data[test_data['student_id'] == student_id]
-            if test_rows.empty:
-                self.logger.write(f"No test logs for student {student_id}, skipping.")
-                continue
-            test_exercises = test_rows['exercises_logs'].values[0]
-            test_corrects = test_rows['is_corrects'].values[0]
-            if len(test_exercises) == 0:
-                self.logger.write(f"Student {student_id} has empty test split, skipping.")
-                continue
-            # key: exercise_id, value: dict of eval results for one exercise
-            stu_eval_results = {}
-            # extra_exercicse_info = extra_datas['exercise_info']
-            flag = True
-            # test_exercises is a nump array of exercise_ids
-            for j, test_exercise_id in enumerate(test_exercises):
-                print(f"  [EXERCISE {j+1}/{len(test_exercises)}] id={test_exercise_id}", flush=True)
-                self.logger.write(f"*****Evaluating student {student_id} on exercise {test_exercise_id}")
-                is_correct = test_corrects[j]
-                # get exercise_info
-                test_exercise_info = {'exercise_id': test_exercise_id, 'is_correct': is_correct}
-                test_exercise_info.update(aggregate_data(test_exercise_id, extra_datas['exercise_info'], 'exercise'))
-
-                prompts = self.llm.get_prompts(data_mode=data_mode)
-                if fewshots_strategy == 'first' or fewshots_strategy == 'last':
-                    if flag:
-                        print(f"  [FEWSHOT] building {fewshots_num} fewshots (strategy={fewshots_strategy})...", flush=True)
-                        fewshots = self.llm.create_fewshots(student_info, test_exercise_info, extra_datas, fewshots_num, fewshots_strategy, data_mode, prompts, self.dataset_name, self.knowledge_graph_path)
-                        print(f"  [FEWSHOT] done, {len(fewshots)} fewshots built", flush=True)
-                        flag = False
-                else:
-                    print(f"  [FEWSHOT] building {fewshots_num} fewshots (strategy={fewshots_strategy})...", flush=True)
-                    fewshots = self.llm.create_fewshots(student_info, test_exercise_info, extra_datas, fewshots_num, fewshots_strategy, data_mode, prompts, self.dataset_name, self.knowledge_graph_path)
-                    print(f"  [FEWSHOT] done, {len(fewshots)} fewshots built", flush=True)
-
-                self.logger.write(f"Fewshots:\n{fewshots}")
-                print(f"  [PREDICT] calling evaluator (strategy={eval_strategy})...", flush=True)
-                exe_eval_results = self.evaluator.evaluate(student_info, test_exercise_info, extra_datas, eval_strategy, fewshots, prompts, data_mode)
-                print(f"  [PREDICT] done, prediction={exe_eval_results.get('prediction','?')}", flush=True)
-                exe_eval_results.update({'is_correct': is_correct})
-                stu_eval_results[test_exercise_id] = exe_eval_results
-                # break # for debug only, only evaluate one exercise
-                # exit()
-            # collect each student's eval results
-            # ...
-            y_pre = []
-            y_true = []
-            for k, v in stu_eval_results.items(): # k is exercise_id, v is dict of eval results for one exercise
-                y_pre.append(int(v['prediction']))
-                y_true.append(int(v['is_correct']))
-            stu_acc = accuracy_score(y_true, y_pre)
-            stu_precision = precision_score(y_true, y_pre)
-            stu_recall = recall_score(y_true, y_pre)
-            stu_f1 = f1_score(y_true, y_pre)
-            stu_test_count = len(y_true)
-            self.logger.write(f"y_true: {y_true}, y_pre: {y_pre}")
-            self.logger.write(f"Student {student_id}, len: {stu_test_count}, acc: {stu_acc}, precision: {stu_precision}, recall: {stu_recall}, f1: {stu_f1}")
-            stu_result = {'student_id': student_id, 'accuracy': stu_acc, 'precision': stu_precision, 'recall': stu_recall, 'f1': stu_f1, 'test_count': stu_test_count, 'eval_results': stu_eval_results}
-            eval_results[student_id] = stu_result
-
-            # Save result immediately (real-time)
-            self.logger.save_student_result(student_id, stu_result)
-
-            total_y_pre.extend(y_pre)
-            total_y_true.extend(y_true)
-            # break # for debug only, only evaluate one student
+        # start evaluation with thread pool
+        if self.max_workers <= 1:
+            # sequential fallback
+            for idx, (i, student_info) in enumerate(students_to_process):
+                student_id, stu_result, y_pre, y_true = self._evaluate_one_student(
+                    idx, len(students_to_process), i, student_info, test_data,
+                    extra_datas, data_mode, fewshots_num, fewshots_strategy, eval_strategy
+                )
+                if stu_result is not None:
+                    eval_results[student_id] = stu_result
+                    total_y_pre.extend(y_pre)
+                    total_y_true.extend(y_true)
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        self._evaluate_one_student,
+                        idx, len(students_to_process), i, student_info, test_data,
+                        extra_datas, data_mode, fewshots_num, fewshots_strategy, eval_strategy,
+                    ): idx
+                    for idx, (i, student_info) in enumerate(students_to_process)
+                }
+                for future in as_completed(future_to_idx):
+                    try:
+                        student_id, stu_result, y_pre, y_true = future.result()
+                    except Exception as exc:
+                        self.logger.write(f"[ERROR] Student evaluation failed: {exc}")
+                        continue
+                    if stu_result is not None:
+                        with self._results_lock:
+                            eval_results[student_id] = stu_result
+                            total_y_pre.extend(y_pre)
+                            total_y_true.extend(y_true)
 
         # add final eval results to eval_results, return eval_results
         if len(total_y_true) == 0:
@@ -240,14 +209,71 @@ class LLMPipeline(Pipeline):
         return eval_results
     
 
+    def _evaluate_one_student(self, idx, total, i, student_info, test_data,
+                               extra_datas, data_mode, fewshots_num, fewshots_strategy, eval_strategy):
+        """Process a single student's evaluation. Returns (student_id, stu_result, y_pre, y_true)."""
+        student_id = str(student_info['student_id'])
+        print(f"[EVAL {idx+1}/{total}] student {student_id}", flush=True)
+        self.logger.write(f"----------------Evaluating student {student_id}")
+        test_rows = test_data[test_data['student_id'] == student_id]
+        if test_rows.empty:
+            self.logger.write(f"No test logs for student {student_id}, skipping.")
+            return student_id, None, [], []
+        test_exercises = test_rows['exercises_logs'].values[0]
+        test_corrects = test_rows['is_corrects'].values[0]
+        if len(test_exercises) == 0:
+            self.logger.write(f"Student {student_id} has empty test split, skipping.")
+            return student_id, None, [], []
+
+        stu_eval_results = {}
+        flag = True
+        for j, test_exercise_id in enumerate(test_exercises):
+            print(f"  [EVAL {idx+1}/{total}] student {student_id} exercise {j+1}/{len(test_exercises)} id={test_exercise_id}", flush=True)
+            self.logger.write(f"*****Evaluating student {student_id} on exercise {test_exercise_id}")
+            is_correct = test_corrects[j]
+            test_exercise_info = {'exercise_id': test_exercise_id, 'is_correct': is_correct}
+            test_exercise_info.update(aggregate_data(test_exercise_id, extra_datas['exercise_info'], 'exercise'))
+
+            prompts = self.llm.get_prompts(data_mode=data_mode)
+            if fewshots_strategy == 'first' or fewshots_strategy == 'last':
+                if flag:
+                    fewshots = self.llm.create_fewshots(student_info, test_exercise_info, extra_datas, fewshots_num, fewshots_strategy, data_mode, prompts, self.dataset_name, self.knowledge_graph_path)
+                    flag = False
+            else:
+                fewshots = self.llm.create_fewshots(student_info, test_exercise_info, extra_datas, fewshots_num, fewshots_strategy, data_mode, prompts, self.dataset_name, self.knowledge_graph_path)
+
+            self.logger.write(f"Fewshots:\n{fewshots}")
+            exe_eval_results = self.evaluator.evaluate(student_info, test_exercise_info, extra_datas, eval_strategy, fewshots, prompts, data_mode)
+            exe_eval_results.update({'is_correct': is_correct})
+            stu_eval_results[test_exercise_id] = exe_eval_results
+
+        y_pre = []
+        y_true = []
+        for k, v in stu_eval_results.items():
+            y_pre.append(int(v['prediction']))
+            y_true.append(int(v['is_correct']))
+        stu_acc = accuracy_score(y_true, y_pre)
+        stu_precision = precision_score(y_true, y_pre)
+        stu_recall = recall_score(y_true, y_pre)
+        stu_f1 = f1_score(y_true, y_pre)
+        stu_test_count = len(y_true)
+        self.logger.write(f"y_true: {y_true}, y_pre: {y_pre}")
+        self.logger.write(f"Student {student_id}, len: {stu_test_count}, acc: {stu_acc}, precision: {stu_precision}, recall: {stu_recall}, f1: {stu_f1}")
+        stu_result = {'student_id': student_id, 'accuracy': stu_acc, 'precision': stu_precision, 'recall': stu_recall, 'f1': stu_f1, 'test_count': stu_test_count, 'eval_results': stu_eval_results}
+
+        # Save result immediately (real-time, thread-safe via logger lock)
+        self.logger.save_student_result(student_id, stu_result)
+
+        return student_id, stu_result, y_pre, y_true
+
     def run(self):
         # LLMs only need to evaluate
-        eval_results = self.evaluate(self.train_data, 
-                                     self.test_data, 
-                                     self.data_mode, 
-                                     self.extra_datas, 
-                                     self.fewshots_num, 
-                                     self.fewshots_strategy, 
+        eval_results = self.evaluate(self.train_data,
+                                     self.test_data,
+                                     self.data_mode,
+                                     self.extra_datas,
+                                     self.fewshots_num,
+                                     self.fewshots_strategy,
                                      self.eval_strategy
                                      )
         self.display_results(eval_results, self.logger)

@@ -22,9 +22,9 @@ import jieba
 BASE_DIR = Path(__file__).resolve().parent
 
 DATASET_GRAPH_PATHS: Dict[str, Path] = {
-    "frcsub": BASE_DIR / "datasets" / "knowledge_graph" / "FrcSub_knowledge_graph.json",
-    "moocradar": BASE_DIR / "datasets" / "knowledge_graph" / "MOOCRadar_knowledge_graph.json",
-    "xes3g5m": BASE_DIR / "datasets" / "knowledge_graph" / "XES3G5M_knowledge_graph.json",
+    "frcsub": BASE_DIR / "datasets" / "sparse" / "FrcSub" / "knowledge_graph.json",
+    "moocradar": BASE_DIR / "datasets" / "moderate" / "MOOCRadar" / "knowledge_graph.json",
+    "xes3g5m": BASE_DIR / "datasets" / "moderate" / "XES3G5M" / "knowledge_graph.json",
 }
 
 DATASET_ALIASES: Dict[str, str] = {
@@ -221,155 +221,100 @@ class KnowledgeGraphSelector(FewShotSelector):
         except (TypeError, ValueError):
             return 0.0
 
-    def _build_prerequisite_index(self) -> Dict[str, Dict[str, float]]:
-        """Build inverse index: dependent_concept → {prerequisite: correctness_score}.
+    def _collect_from_merge_relations(
+        self, node: Dict[str, Any], weights: Dict[str, float]
+    ) -> None:
+        merge_relations = node.get("merge_relations") or {}
+        if not merge_relations:
+            return
 
-        The graph stores prerequisite_relations as "this_concept → dependent".
-        This inverts it so we can look up: "what are the prerequisites of concept X?"
-        """
+        sorted_neighbors = sorted(
+            merge_relations.items(),
+            key=lambda item: -self._safe_float(item[1].get("final_score", 0.0)),
+        )[: self.max_related_concepts]
+
+        for neighbor_id, payload in sorted_neighbors:
+            final_score = self._safe_float(payload.get("final_score", 0.0))
+            if final_score <= 0:
+                continue
+
+            weights[str(neighbor_id)] = max(
+                weights.get(str(neighbor_id), 0.0), final_score
+            )
+
+    def _collect_related_concepts(self, test_concepts: List[str]) -> Dict[str, float]:
         graph = self._load_graph()
         concept_data = graph.get("concepts", {})
+        weights: Dict[str, float] = {}
 
-        prereq_index: Dict[str, Dict[str, float]] = {}
-        for prereq_id, node in concept_data.items():
-            prereq_relations = node.get("is_prerequisite_for") or {}
-            for dependent_id, relation_data in prereq_relations.items():
-                score = self._safe_float(
-                    relation_data.get("correctness_score", 0.0)
-                )
-                if score <= 0:
-                    continue
-                deps = prereq_index.setdefault(dependent_id, {})
-                deps[prereq_id] = max(deps.get(prereq_id, 0.0), score)
+        for concept_id in test_concepts:
+            concept_id_str = str(concept_id)
+            weights[concept_id_str] = max(weights.get(concept_id_str, 0.0), 1.0)
 
-        return prereq_index
+            node = concept_data.get(concept_id_str)
+            if not node:
+                continue
+            self._collect_from_merge_relations(node, weights)
 
-    def _get_per_kp_weights(
-        self, test_kps: List[str]
-    ) -> Dict[str, Dict[str, float]]:
-        """For each test KP, build {concept_id: weight}.
+        return weights
 
-        Self-weight = 1.0, prerequisite weights from the graph,
-        limited to max_related_concepts per KP.
-        """
-        prereq_index = self._build_prerequisite_index()
+    def _get_recency_bounds(
+        self, records: List[Dict[str, Any]]
+    ) -> Optional[Tuple[int, int]]:
+        indices = [record.get("index", 0) for record in records]
+        if not indices:
+            return None
+        return min(indices), max(indices)
 
-        per_kp_weights: Dict[str, Dict[str, float]] = {}
-        for kp in test_kps:
-            kp_str = str(kp)
-            weights: Dict[str, float] = {kp_str: 1.0}
-
-            prereqs = prereq_index.get(kp_str, {})
-            sorted_prereqs = sorted(
-                prereqs.items(), key=lambda x: -x[1]
-            )[: self.max_related_concepts]
-            for prereq_id, score in sorted_prereqs:
-                weights[prereq_id] = score
-
-            per_kp_weights[kp_str] = weights
-
-        return per_kp_weights
-
-    @staticmethod
-    def _score_record_for_test_kp(
+    def _score_record(
+        self,
         record: Dict[str, Any],
         weights: Dict[str, float],
+        recency_bounds: Optional[Tuple[int, int]],
     ) -> float:
-        """Score a historical record against one test KP's weight set.
+        score = 0.0
 
-        Returns score in [0, 1]:
-        - 1.0 if the record contains the test KP itself
-        - max(weight of matching prerequisite) if only prerequisites match
-        - 0.0 if no overlap
-        """
-        record_concepts = [str(s) for s in record.get("skill_ids", [])]
-        if not record_concepts:
-            return 0.0
+        for concept_id in record.get("skill_ids", []):
+            score += weights.get(str(concept_id), 0.0)
 
-        best = 0.0
-        for cid in record_concepts:
-            w = weights.get(cid, 0.0)
-            if w > best:
-                best = w
-                if best >= 1.0:
-                    break
-        return best
+        # Recency bonus based on index (since no timestamp)
+        if recency_bounds:
+            index = record.get("index", 0)
+            earliest, latest = recency_bounds
+            if latest > earliest:
+                recency = (index - earliest) / (latest - earliest)
+            else:
+                recency = 0.0
+            score += recency * 0.2
+
+        # Correctness bonus
+        is_correct = record.get("is_correct")
+        if is_correct is True or is_correct == 1 or is_correct == "1":
+            score += 0.1
+
+        return score
 
     def select(self, records, n_shots, test_record):
-        if not records or n_shots <= 0:
+        if not records:
             return []
 
-        test_kps = test_record.get("skill_ids", [])
-        if not test_kps:
+        concept_weights = self._collect_related_concepts(
+            test_record.get("skill_ids", [])
+        )
+        if not concept_weights:
             selector = RecentSelector()
             return selector.select(records, n_shots, test_record)
 
-        # Step 1: Build per-KP weight maps
-        per_kp_weights = self._get_per_kp_weights(test_kps)
-
-        # Step 2: Per-KP scoring of all historical records
-        kp_keys = [str(kp) for kp in test_kps]
-        per_kp_scores: Dict[str, List[Tuple[float, int]]] = {}
-        for kp in kp_keys:
-            weights = per_kp_weights.get(kp, {kp: 1.0})
-            scored = []
-            for idx, record in enumerate(records):
-                s = self._score_record_for_test_kp(record, weights)
-                if s > 0:
-                    scored.append((s, idx))
-            # Sort by score desc, then index asc for stable order
-            scored.sort(key=lambda x: (-x[0], records[x[1]].get("index", 0)))
-            per_kp_scores[kp] = scored
-
-        # Step 3: Stratified sampling with greedy dedup + redistribution
-        selected_indices: Set[int] = set()
-        selected_records: List[Dict[str, Any]] = []
-        n_kps = len(kp_keys)
-
-        # First round — each KP fills its quota
-        base = n_shots // n_kps
-        remainder = n_shots % n_kps
-
-        for i, kp in enumerate(kp_keys):
-            quota = base + (1 if i < remainder else 0)
-            taken = 0
-            for score, idx in per_kp_scores.get(kp, []):
-                if taken >= quota:
-                    break
-                if idx not in selected_indices:
-                    selected_indices.add(idx)
-                    selected_records.append(records[idx])
-                    taken += 1
-
-        # Second round — redistribute unfilled slots across all remaining candidates
-        need_more = n_shots - len(selected_records)
-        if need_more > 0:
-            redistribute = []
-            for kp in kp_keys:
-                for score, idx in per_kp_scores.get(kp, []):
-                    if idx not in selected_indices:
-                        redistribute.append((score, idx))
-            redistribute.sort(key=lambda x: -x[0])
-
-            for score, idx in redistribute:
-                if need_more <= 0:
-                    break
-                selected_indices.add(idx)
-                selected_records.append(records[idx])
-                need_more -= 1
-
-        # Third round — random fill from remaining unselected records
-        if need_more > 0:
-            remaining_records = [
-                r for i, r in enumerate(records) if i not in selected_indices
-            ]
-            if remaining_records:
-                fill = random.sample(
-                    remaining_records, min(need_more, len(remaining_records))
-                )
-                selected_records.extend(fill)
-
-        return sorted(selected_records, key=lambda r: r.get("index", 0))
+        recency_bounds = self._get_recency_bounds(records)
+        scored_records = [
+            (self._score_record(record, concept_weights, recency_bounds), record)
+            for record in records
+        ]
+        scored_records.sort(
+            key=lambda item: (-item[0], item[1].get("index", 0))
+        )
+        selected = [record for _, record in scored_records[: min(n_shots, len(records))]]
+        return sorted(selected, key=lambda r: r.get("index", 0))
 
 
 # Factory function for easy instantiation

@@ -1,12 +1,8 @@
-"""Utility functions to build and persist a knowledge graph for the dataset.
+"""Build a prerequisite-style knowledge graph following the three-step pipeline:
 
-Adapted from kt_llm/src/generate_knowledge_graph/knowledge_graph_builder_0410.py
-for the Explainable-Few-shot-Knowledge-Tracing data format (JSONL).
-
-Key adaptations:
-- Input format: recordings.jsonl + exercise_info.jsonl (instead of CSV)
-- Field mapping: skill_ids -> concept_ids, skill_desc -> knowledge_concepts
-- Timestamp: Using list index as implicit temporal order
+   Step 1 — Aggregate a, b, c, d counts via Cartesian product of exercise pairs
+   Step 2 — Filter by Phi coefficient (φ ≥ 0.35)
+   Step 3 — Direction discrimination: forward/backward confidence & combined score ≥ 0.6
 """
 
 from __future__ import annotations
@@ -16,47 +12,37 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import sqrt
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from tqdm import tqdm
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_PATH = BASE_DIR.parent / "datasets" / "sparse" / "FrcSub"
 DEFAULT_OUTPUT_PATH = BASE_DIR.parent / "datasets" / "sparse" / "FrcSub" / "knowledge_graph.json"
 
-# Heuristics for correctness-driven prerequisite inference
+# Step 2
+PHI_THRESHOLD = 0.35
+
+# Step 3
 MIN_SUCCESS_STUDENTS_FOR_CORRECTNESS = 3
 MIN_JOINT_SUCCESSES_FOR_CORRECTNESS = 2
-PREREQUISITE_CONFIDENCE_THRESHOLD = 0.6
-PREREQUISITE_FAIL_RATIO_MAX = 0.3
-MIN_PREREQ_ATTEMPT_OVERLAP = 1
-MIN_DEP_FAIL_OVERLAP = 2
-BACKWARD_FAIL_RATIO_MIN = 0.55
+CONFIDENCE_THRESHOLD = 0.6
 COMBINED_SCORE_THRESHOLD = 0.6
 
 
 @dataclass
 class ExerciseRow:
-    """Parsed representation of a single exercise submission."""
-
     student_id: str
     exercise_id: str
     is_correct: int
     concept_ids: List[str]
     knowledge_concepts: List[str]
-    timestamp: int  # Using index as implicit timestamp
 
 
 def _load_exercise_info(data_path: Path, data_mode: str = "sparse") -> Dict[str, Dict]:
-    """Load exercise info from JSONL file.
-
-    Args:
-        data_path: Path to dataset directory containing exercise_info.jsonl
-        data_mode: One of 'onehot', 'sparse', 'moderate'
-
-    Returns:
-        Dict mapping exercise_id to exercise info (skill_ids, skill_desc)
-    """
     if data_mode == "onehot":
         info_file = data_path / "onehot_exercise_info.jsonl"
     elif data_mode == "sparse":
@@ -86,195 +72,163 @@ def _load_rows(
     data_path: Path,
     data_mode: str = "sparse",
     train_split: float = 1.0,
+    exclude_first_n_students: int = 0,
 ) -> Iterable[ExerciseRow]:
-    """Yield parsed ExerciseRow objects from JSONL files.
-
-    Args:
-        data_path: Path to dataset directory
-        data_mode: One of 'onehot', 'sparse', 'moderate'
-        train_split: Fraction of each student's history to use (for consistency with main.py)
-
-    Yields:
-        ExerciseRow objects with implicit timestamp based on index
-    """
     recordings_path = data_path / "recordings.jsonl"
     if not recordings_path.exists():
         raise FileNotFoundError(f"Recordings file not found: {recordings_path}")
 
     exercise_info = _load_exercise_info(data_path, data_mode)
 
+    # Count total students for progress bar
+    with recordings_path.open("r", encoding="utf-8") as _count_f:
+        total_students = sum(1 for _ in _count_f)
+
     with recordings_path.open("r", encoding="utf-8") as f:
-        for line in f:
+        iterator = tqdm(
+            enumerate(f),
+            total=total_students,
+            desc="Loading data",
+            unit="student",
+        )
+        for student_idx, line in iterator:
+            if student_idx < exclude_first_n_students:
+                continue
+
             record = json.loads(line.strip())
             student_id = str(record.get("student_id", ""))
             exercises_logs = record.get("exercises_logs", [])
             is_corrects = record.get("is_corrects", [])
 
-            # Determine split point
             if train_split < 1.0:
                 split_idx = int(len(exercises_logs) * train_split)
                 exercises_logs = exercises_logs[:split_idx]
                 is_corrects = is_corrects[:split_idx]
 
-            for idx, (ex_id, is_correct) in enumerate(zip(exercises_logs, is_corrects)):
+            for ex_id, is_correct in zip(exercises_logs, is_corrects):
                 ex_id_str = str(ex_id)
                 ex_info = exercise_info.get(ex_id_str, {})
                 skill_ids = ex_info.get("skill_ids", [])
                 skill_desc = ex_info.get("skill_desc", [])
 
-                # Convert skill_ids to strings (to match concept_ids format)
-                concept_ids = [str(sid) for sid in skill_ids]
-
                 yield ExerciseRow(
                     student_id=student_id,
                     exercise_id=ex_id_str,
                     is_correct=int(is_correct),
-                    concept_ids=concept_ids,
+                    concept_ids=[str(sid) for sid in skill_ids],
                     knowledge_concepts=skill_desc if skill_desc else ["Unknown Concept"],
-                    timestamp=idx,  # Using index as implicit timestamp
                 )
 
 
-def _evaluate_prerequisite_relation(
-    prereq: str,
-    dependent: str,
-    both_success: int,
-    concept_success_students: Dict[str, Set[str]],
-    concept_attempt_students: Dict[str, Set[str]],
-    concept_failed_students: Dict[str, Set[str]],
-) -> Optional[Dict[str, float]]:
-    """
-    Determine whether `prereq` behaves like a prerequisite for `dependent`.
+def _compute_abcd(
+    student_exercises: Dict[str, List[ExerciseRow]],
+) -> Dict[Tuple[str, str], Tuple[int, int, int, int]]:
+    """Compute a, b, c, d counts for every ordered concept pair.
 
-    Conditions (heuristic):
-    1. Most students who succeed on `dependent` also succeed on `prereq`.
-    2. A meaningful portion of students who succeed on `prereq` attempt `dependent`
-       but fail it, indicating `dependent` is harder.
-    3. Among students who fail `dependent`, many also fail `prereq`
-       (backward support: 缺先修→后续失败).
-    4. The final edge score is a geometric mean of forward confidence,
-       forward stability, and backward failure support.
-    """
+    For each student, group exercises by concept, then take the Cartesian
+    product of exercise subsets for each concept pair (i, j):
 
-    prereq_success = concept_success_students.get(prereq, set())
-    dependent_success = concept_success_students.get(dependent, set())
-    if (
-        len(prereq_success) < MIN_SUCCESS_STUDENTS_FOR_CORRECTNESS
-        or len(dependent_success) < MIN_SUCCESS_STUDENTS_FOR_CORRECTNESS
-        or both_success < MIN_JOINT_SUCCESSES_FOR_CORRECTNESS
+      a = i wrong & j wrong
+      b = i wrong & j correct
+      c = i correct & j wrong
+      d = i correct & j correct
+
+    Returns:
+        Dict mapping (concept_i, concept_j) -> (a, b, c, d)
+    """
+    counter: Dict[Tuple[str, str], List[int]] = defaultdict(lambda: [0, 0, 0, 0])
+
+    for rows in tqdm(
+        student_exercises.values(),
+        desc="Step 1: Computing a/b/c/d",
+        unit="student",
     ):
+        # Group exercises by concept for this student
+        by_concept: Dict[str, List[ExerciseRow]] = defaultdict(list)
+        for row in rows:
+            for cid in row.concept_ids:
+                by_concept[cid].append(row)
+
+        concepts = list(by_concept.keys())
+        for idx_i in range(len(concepts)):
+            for idx_j in range(len(concepts)):
+                if idx_i == idx_j:
+                    continue
+                ci, cj = concepts[idx_i], concepts[idx_j]
+                ex_i_list = by_concept[ci]
+                ex_j_list = by_concept[cj]
+
+                for ex_i in ex_i_list:
+                    for ex_j in ex_j_list:
+                        si, sj = ex_i.is_correct, ex_j.is_correct
+                        if si == 0 and sj == 0:
+                            counter[(ci, cj)][0] += 1  # a
+                        elif si == 0 and sj == 1:
+                            counter[(ci, cj)][1] += 1  # b
+                        elif si == 1 and sj == 0:
+                            counter[(ci, cj)][2] += 1  # c
+                        else:
+                            counter[(ci, cj)][3] += 1  # d
+
+    return {k: tuple(v) for k, v in counter.items()}
+
+
+def _phi(a: int, b: int, c: int, d: int) -> float:
+    """Phi coefficient for a 2x2 contingency table."""
+    denom = sqrt((a + b) * (c + d) * (a + c) * (b + d))
+    return 0.0 if denom == 0 else (a * d - b * c) / denom
+
+
+def _evaluate_prerequisite_relation(
+    a: int,
+    b: int,
+    c: int,
+    d: int,
+    prereq_success_count: int,
+    phi_coef: float,
+) -> Optional[Dict[str, Any]]:
+    """Apply Step-3 filters to decide whether `prereq -> dependent` is valid.
+
+    Returns a dict with correctness_score (combined score) and intermediate
+    values, or None when any filter rejects the pair.
+    """
+    # 3.1 — Sample frequency check
+    if prereq_success_count < MIN_SUCCESS_STUDENTS_FOR_CORRECTNESS:
+        return None
+    if d < MIN_JOINT_SUCCESSES_FOR_CORRECTNESS:
         return None
 
-    prereq_given_dependent = both_success / len(dependent_success)
-    if prereq_given_dependent < PREREQUISITE_CONFIDENCE_THRESHOLD:
+    # 3.2 — Forward confidence  P(I|J) = d / (b + d)
+    denom_fwd = b + d
+    if denom_fwd == 0:
+        return None
+    forward_conf = d / denom_fwd
+    if forward_conf < CONFIDENCE_THRESHOLD:
         return None
 
-    dependent_attempters = concept_attempt_students.get(dependent, set())
-    if not dependent_attempters:
+    # 3.2 — Backward confidence  P(¬J|¬I) = a / (a + b)
+    denom_bwd = a + b
+    if denom_bwd == 0:
+        return None
+    backward_conf = a / denom_bwd
+    if backward_conf < CONFIDENCE_THRESHOLD:
         return None
 
-    prereq_success_attempted_dependent = prereq_success & dependent_attempters
-    if len(prereq_success_attempted_dependent) < MIN_PREREQ_ATTEMPT_OVERLAP:
-        return None
-
-    dependent_failed_students = concept_failed_students.get(dependent, set())
-    fail_support = prereq_success_attempted_dependent & dependent_failed_students
-    if not fail_support:
-        return None
-
-    fail_ratio = len(fail_support) / len(prereq_success_attempted_dependent)
-    if fail_ratio > PREREQUISITE_FAIL_RATIO_MAX:
-        return None
-
-    prereq_attempters = concept_attempt_students.get(prereq, set())
-    prereq_failed_students = concept_failed_students.get(prereq, set())
-    backward_attempt_overlap = dependent_failed_students & prereq_attempters
-    if len(backward_attempt_overlap) < MIN_DEP_FAIL_OVERLAP:
-        return None
-
-    backward_fail_support = backward_attempt_overlap & prereq_failed_students
-    back_fail_ratio = len(backward_fail_support) / len(backward_attempt_overlap)
-    if back_fail_ratio < BACKWARD_FAIL_RATIO_MIN:
-        return None
-
-    stable = 1 - fail_ratio
-    combined_score = (prereq_given_dependent * stable * back_fail_ratio) ** (1 / 3)
-    if combined_score < COMBINED_SCORE_THRESHOLD:
+    # 3.3 — Combined score (geometric mean)
+    combined = sqrt(forward_conf * backward_conf)
+    if combined < COMBINED_SCORE_THRESHOLD:
         return None
 
     return {
-        "correctness_score": round(combined_score, 4),
-        "combined_score": round(combined_score, 4),
-        "confidence": round(prereq_given_dependent, 4),
-        "fail_ratio": round(fail_ratio, 4),
-        "back_fail": round(back_fail_ratio, 4),
-        "joint_success": both_success,
-        "fail_support": len(fail_support),
-        "back_fail_support": len(backward_fail_support),
-        "forward_support": len(prereq_success_attempted_dependent),
-        "backward_support": len(backward_attempt_overlap),
+        "correctness_score": round(combined, 4),
+        "forward_confidence": round(forward_conf, 4),
+        "backward_confidence": round(backward_conf, 4),
+        "phi_coefficient": round(phi_coef, 4),
+        "a": a,
+        "b_j": b,
+        "c_i": c,
+        "d_ij": d,
     }
-
-
-def _compute_sequence_scores(forward_edges: Dict[str, int]) -> Dict[str, float]:
-    """Normalize outgoing transition counts into probabilities."""
-
-    total_weight = 0.0
-    cleaned_edges: Dict[str, float] = {}
-    for dst, weight in forward_edges.items():
-        if weight <= 0:
-            continue
-        cleaned_edges[dst] = float(weight)
-        total_weight += float(weight)
-
-    if total_weight <= 0:
-        return {}
-
-    return {dst: weight / total_weight for dst, weight in cleaned_edges.items()}
-
-
-def _safe_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _merge_relations(
-    correctness_rel: Dict[str, Dict[str, Any]],
-    forward_rel: Dict[str, Dict[str, Any]],
-    sequence_scale: float,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, int]]:
-    """Merge correctness-based and sequence-based relations into a unified scoring system."""
-
-    merged: Dict[str, Dict[str, float]] = {}
-    stats = {"correctness_edges_used": 0, "sequence_edges_used": 0}
-    targets = sorted(set(correctness_rel.keys()) | set(forward_rel.keys()))
-
-    for dst in targets:
-        correctness_score = _safe_float(
-            (correctness_rel.get(dst) or {}).get("correctness_score")
-        )
-        sequence_score = _safe_float(
-            (forward_rel.get(dst) or {}).get("sequence_score")
-        )
-
-        if correctness_score <= 0 and sequence_score <= 0:
-            continue
-
-        final_score = (correctness_score * (1 - sequence_scale)) + (sequence_score * sequence_scale)
-        stats["correctness_edges_used"] += 1
-        stats["sequence_edges_used"] += 1
-        source = "both"
-
-        merged[dst] = {
-            "correctness_score": round(correctness_score, 4),
-            "sequence_score": round(sequence_score, 4),
-            "source": source,
-            "final_score": round(final_score, 4),
-        }
-
-    return merged, stats
 
 
 def build_knowledge_graph(
@@ -282,217 +236,112 @@ def build_knowledge_graph(
     output_path: Path = DEFAULT_OUTPUT_PATH,
     data_mode: str = "sparse",
     train_split: float = 1.0,
-    min_edge_weight: int = 1,
-    sequence_scale: float = 0.2,
+    exclude_first_n_students: int = 0,
 ) -> Dict:
-    """
-    Build a prerequisite-style knowledge graph enriched with merged scoring signals.
+    """Build a prerequisite knowledge graph following the three-step pipeline.
 
     Args:
-        data_path: Path to dataset directory containing recordings.jsonl and exercise_info.jsonl
-        output_path: Path where the generated knowledge graph JSON should be stored
-        data_mode: One of 'onehot', 'sparse', 'moderate'
-        train_split: Fraction of each student's history to use
-        min_edge_weight: Minimum transition count for time-sequence edges
-        sequence_scale: Weight of sequence signal in merged score
+        data_path: Directory containing recordings.jsonl and exercise_info.jsonl.
+        output_path: Where the generated knowledge graph JSON is saved.
+        data_mode: One of 'onehot', 'sparse', 'moderate'.
+        train_split: Fraction of each student's history to use.
+        exclude_first_n_students: Students to skip (avoid data leakage).
 
     Returns:
-        The generated knowledge graph dictionary
+        The generated knowledge graph dictionary.
     """
-
-    student_records: Dict[str, List[ExerciseRow]] = defaultdict(list)
-    concept_attempts = defaultdict(int)
-    concept_correct = defaultdict(int)
-    concept_name = {}
-    student_attempted_concepts: Dict[str, Set[str]] = defaultdict(set)
-    student_correct_concepts: Dict[str, Set[str]] = defaultdict(set)
-    concept_attempt_students: Dict[str, Set[str]] = defaultdict(set)
+    # ── Load data ──────────────────────────────────────────────────────────
+    student_exercises: Dict[str, List[ExerciseRow]] = defaultdict(list)
+    concept_names: Dict[str, str] = {}
     concept_success_students: Dict[str, Set[str]] = defaultdict(set)
 
     total_rows = 0
-    for row in _load_rows(data_path, data_mode, train_split):
+    for row in _load_rows(data_path, data_mode, train_split, exclude_first_n_students):
         total_rows += 1
-        student_records[row.student_id].append(row)
-        if row.concept_ids:
-            student_attempted_concepts[row.student_id].update(row.concept_ids)
-            if row.is_correct:
-                student_correct_concepts[row.student_id].update(row.concept_ids)
-        for idx, concept_id in enumerate(row.concept_ids):
-            concept_attempts[concept_id] += 1
-            if row.is_correct:
-                concept_correct[concept_id] += 1
-                concept_success_students[concept_id].add(row.student_id)
-            concept_attempt_students[concept_id].add(row.student_id)
+        student_exercises[row.student_id].append(row)
+        if row.is_correct:
+            for cid in row.concept_ids:
+                concept_success_students[cid].add(row.student_id)
+        for idx, cid in enumerate(row.concept_ids):
+            if cid not in concept_names:
+                names = row.knowledge_concepts
+                concept_names[cid] = (
+                    names[idx] if idx < len(names) else names[0] if names else "Unknown Concept"
+                )
 
-            if concept_id not in concept_name:
-                if idx < len(row.knowledge_concepts):
-                    concept_name[concept_id] = row.knowledge_concepts[idx]
-                elif row.knowledge_concepts:
-                    concept_name[concept_id] = row.knowledge_concepts[0]
-                else:
-                    concept_name[concept_id] = "Unknown Concept"
+    # ── Step 1:  a, b, c, d aggregation ────────────────────────────────────
+    abcd = _compute_abcd(student_exercises)
 
-    concept_failed_students: Dict[str, Set[str]] = defaultdict(set)
-    for student_id, attempted in student_attempted_concepts.items():
-        successes = student_correct_concepts.get(student_id, set())
-        for concept_id in attempted - successes:
-            concept_failed_students[concept_id].add(student_id)
+    # ── Step 2 & 3:  Phi filter → direction evaluation ────────────────────
+    edges: Dict[str, Dict[str, Dict]] = {}
 
-    joint_success_counts: Dict[Tuple[str, str], int] = defaultdict(int)
-    for concepts in student_correct_concepts.values():
-        unique_concepts = sorted(concepts)
-        for idx, concept_a in enumerate(unique_concepts):
-            for concept_b in unique_concepts[idx + 1 :]:
-                joint_success_counts[(concept_a, concept_b)] += 1
+    for (ci, cj), (a, b, c, d) in tqdm(abcd.items(), desc="Step 2&3: Filtering edges", unit="pair"):
+        # Step 2
+        phi_coef = _phi(a, b, c, d)
+        if phi_coef < PHI_THRESHOLD:
+            continue
 
-    correctness_enables: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
-    for (concept_a, concept_b), both_success in joint_success_counts.items():
-        relation_ab = _evaluate_prerequisite_relation(
-            prereq=concept_a,
-            dependent=concept_b,
-            both_success=both_success,
-            concept_success_students=concept_success_students,
-            concept_attempt_students=concept_attempt_students,
-            concept_failed_students=concept_failed_students,
+        # Step 3
+        result = _evaluate_prerequisite_relation(
+            a=a,
+            b=b,
+            c=c,
+            d=d,
+            prereq_success_count=len(concept_success_students.get(ci, set())),
+            phi_coef=phi_coef,
         )
-        if relation_ab:
-            correctness_enables[concept_a][concept_b] = relation_ab
+        if result is not None:
+            edges.setdefault(ci, {})[cj] = result
 
-        relation_ba = _evaluate_prerequisite_relation(
-            prereq=concept_b,
-            dependent=concept_a,
-            both_success=both_success,
-            concept_success_students=concept_success_students,
-            concept_attempt_students=concept_attempt_students,
-            concept_failed_students=concept_failed_students,
-        )
-        if relation_ba:
-            correctness_enables[concept_b][concept_a] = relation_ba
-
-    forward_links: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-
-    for history in student_records.values():
-        history.sort(key=lambda record: record.timestamp)
-        previous_concepts: List[str] = []
-        for record in history:
-            if previous_concepts:
-                for prev in previous_concepts:
-                    for current in record.concept_ids:
-                        if prev == current:
-                            continue
-                        forward_links[prev][current] += 1
-            previous_concepts = record.concept_ids
-
-    filtered_forward_links: Dict[str, Dict[str, int]] = {}
-    for src, targets in forward_links.items():
-        strong_targets = {
-            dst: weight for dst, weight in targets.items() if weight >= min_edge_weight
-        }
-        if strong_targets:
-            filtered_forward_links[src] = strong_targets
-
-    correctness_edge_count = sum(len(targets) for targets in correctness_enables.values())
-
-    graph = {
+    # ── Build output ───────────────────────────────────────────────────────
+    graph: Dict[str, Any] = {
         "meta": {
             "source": str(data_path),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "data_mode": data_mode,
             "train_split": train_split,
+            "exclude_first_n_students": exclude_first_n_students,
             "total_rows": total_rows,
-            "students": len(student_records),
-            "min_edge_weight": min_edge_weight,
-            "sequence_scale": sequence_scale,
+            "students": len(student_exercises),
+            "phi_threshold": PHI_THRESHOLD,
             "correctness_config": {
                 "min_success_students": MIN_SUCCESS_STUDENTS_FOR_CORRECTNESS,
                 "min_joint_successes": MIN_JOINT_SUCCESSES_FOR_CORRECTNESS,
-                "confidence_threshold": PREREQUISITE_CONFIDENCE_THRESHOLD,
-                "fail_ratio_max": PREREQUISITE_FAIL_RATIO_MAX,
-                "min_attempt_overlap": MIN_PREREQ_ATTEMPT_OVERLAP,
-                "min_backward_overlap": MIN_DEP_FAIL_OVERLAP,
-                "backward_fail_min": BACKWARD_FAIL_RATIO_MIN,
+                "confidence_threshold": CONFIDENCE_THRESHOLD,
                 "combined_score_threshold": COMBINED_SCORE_THRESHOLD,
             },
-            "correctness_edges": correctness_edge_count,
         },
         "concepts": {},
     }
 
-    forward_edge_count = 0
-    merge_edge_count = 0
-    merge_correctness_edges = 0
-    merge_sequence_edges = 0
-
-    for concept_id, attempts in concept_attempts.items():
-        if attempts == 0:
-            continue
-
-        accuracy = concept_correct[concept_id] / attempts
-        forward_edges = filtered_forward_links.get(concept_id, {})
-        sequence_scores = _compute_sequence_scores(forward_edges)
-
-        forward_time_relations = {}
-        for dst, edge_count in sorted(
-            forward_edges.items(),
-            key=lambda item: -sequence_scores.get(item[0], 0.0),
-        ):
-            dst_key = str(dst)
-            forward_time_relations[dst_key] = {
-                "edge_count": int(edge_count),
-                "sequence_score": round(sequence_scores.get(dst, 0.0), 4),
-            }
-
-        correctness_relations = {}
-        enables_rel = correctness_enables.get(concept_id, {})
-        for dst, payload in sorted(
-            enables_rel.items(),
-            key=lambda item: -item[1].get("combined_score", item[1].get("correctness_score", 0.0)),
-        ):
-            dst_key = str(dst)
-            correctness_relations[dst_key] = {
-                "correctness_score": round(payload.get("correctness_score", 0.0), 4),
-                "combined_score": round(payload.get("combined_score", 0.0), 4),
-                "confidence": round(payload.get("confidence", 0.0), 4),
-                "joint_success": int(payload.get("joint_success", 0)),
-                "fail_support": int(payload.get("fail_support", 0)),
-                "fail_ratio": round(payload.get("fail_ratio", 0.0), 4),
-                "back_fail": round(payload.get("back_fail", 0.0), 4),
-                "back_fail_support": int(payload.get("back_fail_support", 0)),
-                "forward_support": int(payload.get("forward_support", 0)),
-                "backward_support": int(payload.get("backward_support", 0)),
-            }
-
-        merged_relations, merge_stats = _merge_relations(
-            correctness_relations, forward_time_relations, sequence_scale
-        )
-
-        forward_edge_count += len(forward_time_relations)
-        merge_edge_count += len(merged_relations)
-        merge_correctness_edges += merge_stats["correctness_edges_used"]
-        merge_sequence_edges += merge_stats["sequence_edges_used"]
-
-        graph["concepts"][str(concept_id)] = {
-            "concept_id": concept_id,
-            "name": concept_name.get(concept_id, "Unknown Concept"),
-            "accuracy": round(accuracy, 4),
-            "correct_attempts": concept_correct[concept_id],
-            "total_attempts": attempts,
-            "forward_time_relations": forward_time_relations,
-            "correctness_relations": correctness_relations,
-            "merge_relations": merged_relations,
+    total_edges = 0
+    for cid in sorted(concept_names):
+        out_edges = edges.get(cid, {})
+        total_edges += len(out_edges)
+        graph["concepts"][cid] = {
+            "concept_id": cid,
+            "name": concept_names[cid],
+            "is_prerequisite_for": {
+                dst: {
+                    "name": concept_names[dst],
+                    "correctness_score": v["correctness_score"],
+                    "forward_confidence": v["forward_confidence"],
+                    "backward_confidence": v["backward_confidence"],
+                    "phi_coefficient": v["phi_coefficient"],
+                    "a": v["a"],
+                    "b_j": v["b_j"],
+                    "c_i": v["c_i"],
+                    "d_ij": v["d_ij"],
+                }
+                for dst, v in sorted(out_edges.items(), key=lambda x: -x[1]["correctness_score"])
+            },
         }
 
-    graph["meta"]["edge_statistics"] = {
-        "forward_time_edges": forward_edge_count,
-        "correctness_edges": correctness_edge_count,
-        "merge_edges": merge_edge_count,
-        "merge_correctness_edges": merge_correctness_edges,
-        "merge_sequence_edges": merge_sequence_edges,
-    }
+    graph["meta"]["total_edges"] = total_edges
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as graph_fp:
-        json.dump(graph, graph_fp, ensure_ascii=False, indent=2)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(graph, f, ensure_ascii=False, indent=2)
 
     return graph
 
@@ -505,38 +354,27 @@ def parse_args() -> argparse.Namespace:
         "--data-path",
         type=Path,
         default=DEFAULT_DATA_PATH,
-        help="Path to the dataset directory containing recordings.jsonl and exercise_info.jsonl.",
     )
     parser.add_argument(
         "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
-        help="Path where the generated knowledge graph JSON should be stored.",
     )
     parser.add_argument(
         "--data-mode",
         type=str,
         default="sparse",
         choices=["onehot", "sparse", "moderate"],
-        help="Data mode to determine exercise_info file name.",
     )
     parser.add_argument(
         "--train-split",
         type=float,
         default=1.0,
-        help="Fraction of each student's history to use (default: 1.0 = all).",
     )
     parser.add_argument(
-        "--min-edge-weight",
+        "--exclude-first-n-students",
         type=int,
-        default=2,
-        help="Drop edges whose transition count is below this threshold.",
-    )
-    parser.add_argument(
-        "--sequence-scale",
-        type=float,
-        default=0.2,
-        help="Scaling factor applied when only the time-sequence signal is available.",
+        default=0,
     )
     return parser.parse_args()
 
@@ -548,13 +386,15 @@ def main():
         output_path=args.output_path,
         data_mode=args.data_mode,
         train_split=args.train_split,
-        min_edge_weight=max(1, args.min_edge_weight),
-        sequence_scale=max(0.0, args.sequence_scale),
+        exclude_first_n_students=args.exclude_first_n_students,
     )
     print(
         f"Knowledge graph built for {len(graph['concepts'])} concepts "
-        f"with data from {graph['meta']['students']} students."
+        f"with data from {graph['meta']['students']} students. "
+        f"Total edges: {graph['meta']['total_edges']}."
     )
+    if args.exclude_first_n_students > 0:
+        print(f"Excluded first {args.exclude_first_n_students} students to avoid data leakage.")
     print(f"Output saved to: {args.output_path}")
 
 

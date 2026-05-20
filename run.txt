@@ -166,7 +166,28 @@ python main.py \
   --fewshot_strategy knowledge_graph \
   --knowledge_graph_path ./datasets/knowledge_graph/MOOCRadar_knowledge_graph.json \
   --eval_strategy simple \
-  --test_num 10 \
+  --test_num 50 \
+  --random_seed 42 \
+  --skip_post_explain \
+  --workers 10 \
+  --version v1
+
+
+# 运行指定学生ID (例如: 学生1, 3, 7)
+python main.py \
+  --model_type llm \
+  --model_name gpt-3.5-turbo \
+  --data_path ./datasets \
+  --data_mode moderate \
+  --dataset_name MOOCRadar \
+  --log_path ./logs \
+  --train_split 0.8 \
+  --is_shuffle \
+  --fewshot_num 16 \
+  --fewshot_strategy knowledge_graph \
+  --knowledge_graph_path ./datasets/knowledge_graph/MOOCRadar_knowledge_graph.json \
+  --eval_strategy simple \
+  --student_ids "8,5,3,7" \
   --random_seed 42 \
   --skip_post_explain \
   --workers 10 \

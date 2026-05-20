@@ -19,6 +19,10 @@ class LLMDataLoader(DataLoaderBase):
         self.data_mode = args.data_mode
         self.logger = logger
         self.test_num = args.test_num
+        # 解析student_ids参数
+        self.student_ids = None
+        if hasattr(args, 'student_ids') and args.student_ids:
+            self.student_ids = [sid.strip() for sid in args.student_ids.split(',')]
 
     def load_user_data(self, data_path: str, is_shuffle: bool, train_split: float, create_train_test = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
         # load user_logs from recordings.csv, each line is a user's exercise record with the format above
@@ -34,7 +38,31 @@ class LLMDataLoader(DataLoaderBase):
             # read from existing train and test data
             train_data_path = os.path.join(data_path, f"{is_shuffle}_{train_split}_train_data.jsonl")
             test_data_path = os.path.join(data_path, f"{is_shuffle}_{train_split}_test_data.jsonl")
-            if self.test_num != -1:
+
+            # 如果指定了student_ids，按指定ID筛选
+            if self.student_ids:
+                self.logger.write(f"Loading specific student_ids: {self.student_ids}")
+                needed_ids = set(self.student_ids)
+                # 加载test_data，只保留指定student_id
+                test_rows = []
+                with open(test_data_path, "r") as f:
+                    for line in f:
+                        obj = json.loads(line)
+                        if str(obj["student_id"]) in needed_ids:
+                            test_rows.append(obj)
+                test_data = pd.DataFrame(test_rows) if test_rows else pd.DataFrame(columns=["student_id", "exercises_logs", "is_corrects"])
+                test_data = test_data.astype({"student_id": str})
+                # 加载train_data，只保留指定student_id
+                train_rows = []
+                with open(train_data_path, "r") as f:
+                    for line in f:
+                        obj = json.loads(line)
+                        if str(obj["student_id"]) in needed_ids:
+                            train_rows.append(obj)
+                train_data = pd.DataFrame(train_rows) if train_rows else pd.DataFrame(columns=["student_id", "exercises_logs", "is_corrects"])
+                train_data = train_data.astype({"student_id": str})
+                self.logger.write(f"Loaded {len(test_data)} test students, {len(train_data)} train students by student_ids filter")
+            elif self.test_num != -1:
                 # fast path: only load the first test_num rows of test_data,
                 # then stream train_data to keep only matching student_ids
                 test_data = pd.read_json(test_data_path, lines=True, nrows=self.test_num)
@@ -61,6 +89,13 @@ class LLMDataLoader(DataLoaderBase):
             # create train and test data from recordings.jsonl
             self.logger.write(f"Creating train and test data from recordings.jsonl")
             recordings_df = pd.read_json(recordings_path, lines=True)
+
+            # 如果指定了student_ids，先筛选recordings_df
+            if self.student_ids:
+                self.logger.write(f"Filtering by student_ids: {self.student_ids}")
+                recordings_df = recordings_df[recordings_df['student_id'].astype(str).isin(self.student_ids)]
+                self.logger.write(f"Filtered to {len(recordings_df)} students")
+
             # collect rows into lists first, then build DataFrame once (avoids O(n²) pd.concat in loop)
             train_rows = []
             test_rows = []

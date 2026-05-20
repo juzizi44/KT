@@ -32,7 +32,7 @@ class Logger:
             os.makedirs(log_dir)
 
         # Create result directory (now includes fewshot_strategy)
-        result_dir = os.path.join("results", args.model_name, args.data_mode, args.fewshot_strategy, args.dataset_name)
+        result_dir = os.path.join(f"results_{self.version}", args.model_name, args.data_mode, args.fewshot_strategy, args.dataset_name)
         if not os.path.exists(result_dir):
             os.makedirs(result_dir)
 

@@ -67,7 +67,7 @@ def gpt_chat_v2(
     print(f"  [GPT V2 API] <- done in {elapsed:.1f}s, choices={len(response.choices)}", flush=True)
 
     # Rate limiting
-    time.sleep(3)
+    time.sleep(0.1)
 
     if num_comps == 1:
         return response.choices[0].message.content

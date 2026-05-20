@@ -29,6 +29,10 @@ def get_args():
     parser.add_argument('--is_shuffle', action='store_true', help='shuffle data when splitting')
     # test number
     parser.add_argument('--test_num', type=int, default=20, help='test number')
+    # specific student ids to run (comma-separated, e.g., "1,3,7")
+    parser.add_argument('--student_ids', type=str, default=None,
+                        help='Specific student IDs to run, comma-separated (e.g., "1,3,7"). '
+                             'If specified, test_num is ignored and only these students are processed.')
     # random seed
     parser.add_argument('--random_seed', type=int, default=42, help='random seed')
     # concurrent workers

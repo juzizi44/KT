@@ -59,7 +59,7 @@ def glm_chat(
         data = resp.json()
     print(f"  [GLM API] response received, status={resp.status_code}", flush=True)
 
-    time.sleep(1)
+    time.sleep(0.1)
     choices = data["choices"]
     if num_comps == 1:
         return choices[0]["message"]["content"]

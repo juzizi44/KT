@@ -7,5 +7,5 @@ results_old
 tmp_analysis
 __pycache__/
 venv
-results_old2
-results_multi
+results_v1
+results_v3

@@ -53,7 +53,7 @@ def gpt_chat(
     print(f"  [GPT API] <- done in {elapsed:.1f}s, choices={len(response.choices)}", flush=True)
 
     # set time to wait 6 seconds for limit of 10 requests per minute
-    time.sleep(3)
+    time.sleep(0.1)
 
     if num_comps == 1:
         return response.choices[0].message.content  # type: ignore

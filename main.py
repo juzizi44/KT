@@ -2,6 +2,9 @@ import sys
 print("[BOOT] main.py starting, Python imports beginning...", flush=True)
 import os
 print("[IMPORT] os ok", flush=True)
+from dotenv import load_dotenv
+load_dotenv()
+print("[IMPORT] dotenv ok", flush=True)
 import argparse
 print("[IMPORT] argparse ok", flush=True)
 from pipline_factory import LLMPipeline

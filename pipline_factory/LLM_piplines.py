@@ -1,13 +1,13 @@
 from .piplines import Pipeline
 from mylogger import Logger
 from LLM_factory.GLM import GLM47, GLM4, GLM3
-from LLM_factory.GLM_v2 import GLM47V2, GLM4V2, GLM3V2
 from LLM_factory.GLM_v3 import GLM47V3, GLM4V3, GLM3V3
 from LLM_factory.GPT import GPTChat, GPT4, GPT35
-from LLM_factory.GPT_v2 import GPTChatV2, GPT4V2, GPT35V2
 from LLM_factory.GPT_v3 import GPTChatV3, GPT4V3, GPT35V3
+from LLM_factory.DeepSeek import DeepSeekChat, DeepSeekFlash
+from LLM_factory.DeepSeek_v3 import DeepSeekChatV3, DeepSeekFlashV3
 from LLM_factory.model import LLMModelBase
-from evaluator_factory import LLMEvaluator, LLMEvaluatorV2, LLMEvaluatorV3
+from evaluator_factory import LLMEvaluator, LLMEvaluatorV3
 from utils import aggregate_data
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import datetime
@@ -71,13 +71,11 @@ class LLMPipeline(Pipeline):
 
         Args:
             model_name: Model name (e.g., 'glm-4.7', 'gpt-4')
-            version: 'v1' for multi-turn, 'v2' for single-turn
+            version: 'v1' for multi-turn, 'v3' for producer-critic-judge
 
         Returns:
             LLM model instance
         """
-        if version == 'v2':
-            return self._init_llm_v2(model_name)
         if version == 'v3':
             return self._init_llm_v3(model_name)
         return self._init_llm_v1(model_name)
@@ -103,31 +101,11 @@ class LLMPipeline(Pipeline):
                 llm = GPTChat(model_name)
             else:
                 raise ValueError(f"Invalid gpt model name: {model_name}")
-        else:
-            raise ValueError(f"Invalid model name: {model_name}")
-        return llm
-
-    def _init_llm_v2(self, model_name):
-        """Initialize V2 LLM (single-turn)."""
-        if model_name.startswith("glm"):
-            if model_name == "glm-4.7":
-                llm = GLM47V2()
-            elif model_name == "glm-4":
-                llm = GLM4V2()
-            elif model_name == "glm-3-turbo":
-                llm = GLM3V2()
+        elif model_name.startswith('deepseek'):
+            if model_name == 'deepseek-v4-flash':
+                llm = DeepSeekFlash()
             else:
-                from LLM_factory.GLM_v2 import GLMChatV2
-                llm = GLMChatV2(model_name)
-        elif model_name.startswith('gpt'):
-            if model_name == 'gpt-4' or model_name == 'gpt-4-1106-preview' or model_name == 'gpt-4-32k':
-                llm = GPT4V2()
-            elif model_name == 'gpt-3.5-turbo':
-                llm = GPT35V2()
-            elif model_name.startswith('gpt-3.5-turbo'):
-                llm = GPTChatV2(model_name)
-            else:
-                raise ValueError(f"Invalid gpt model name: {model_name}")
+                llm = DeepSeekChat(model_name)
         else:
             raise ValueError(f"Invalid model name: {model_name}")
         return llm
@@ -153,18 +131,17 @@ class LLMPipeline(Pipeline):
                 llm = GPTChatV3(model_name)
             else:
                 raise ValueError(f"Invalid gpt model name: {model_name}")
+        elif model_name.startswith('deepseek'):
+            if model_name == 'deepseek-v4-flash':
+                llm = DeepSeekFlashV3()
+            else:
+                llm = DeepSeekChatV3(model_name)
         else:
             raise ValueError(f"Invalid model name: {model_name}")
         return llm
 
     def init_evaluator(self, eval_strategy, logger, skip_post_explain):
         """Initialize evaluator based on version."""
-        if self.version == 'v2':
-            return LLMEvaluatorV2(
-                eval_strategy=eval_strategy,
-                logger=logger,
-                llm=self.llm,
-            )
         if self.version == 'v3':
             return LLMEvaluatorV3(
                 eval_strategy=eval_strategy,

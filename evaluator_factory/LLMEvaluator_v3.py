@@ -15,10 +15,13 @@ from LLM_factory.prompt_factory_v3 import (
 )
 from LLM_factory.GLM import GLMChat, GLM4, GLM3
 from LLM_factory.GPT import GPTChat, GPT4, GPT35
+from LLM_factory.DeepSeek import DeepSeekChat, DeepSeekFlash
 
 
 def _model_family(model_name: str) -> str:
-    return 'glm' if model_name.startswith('glm') or model_name.startswith('z-ai/') else 'gpt'
+    if model_name.startswith('glm') or model_name.startswith('z-ai/'):
+        return 'glm'
+    return 'gpt'
 
 
 def _build_v1_llm(model_name: str) -> LLMModelBase:
@@ -38,6 +41,10 @@ def _build_v1_llm(model_name: str) -> LLMModelBase:
         if model_name.startswith('gpt-3.5-turbo'):
             return GPTChat(model_name)
         raise ValueError(f'Invalid gpt model name: {model_name}')
+    if model_name.startswith('deepseek'):
+        if model_name == 'deepseek-v4-flash':
+            return DeepSeekFlash()
+        return DeepSeekChat(model_name)
     raise ValueError(f'Invalid model name: {model_name}')
 
 

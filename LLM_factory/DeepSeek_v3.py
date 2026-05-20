@@ -1,13 +1,13 @@
 from typing import List
 
-from LLM_factory.GLM import GLMChat, GLM4, GLM3, GLM_MODEL_NAME
+from LLM_factory.DeepSeek import DeepSeekChat, DeepSeekFlash
 from LLM_factory.fewshot_generator_v3 import generic_create_fewshots_v3, generic_create_user_data_v3
 from LLM_factory.prompt_factory_v3 import generic_get_prompts_v3
 
 
-class GLMChatV3(GLMChat):
+class DeepSeekChatV3(DeepSeekChat):
     def get_prompts(self, data_mode: str) -> dict:
-        return generic_get_prompts_v3('glm', data_mode)
+        return generic_get_prompts_v3('gpt', data_mode)
 
     def create_user_data(self, student_info, test_exercise_info, extra_datas, data_mode) -> str:
         return generic_create_user_data_v3(student_info, test_exercise_info, extra_datas, data_mode)
@@ -39,16 +39,6 @@ class GLMChatV3(GLMChat):
         )
 
 
-class GLM47V3(GLMChatV3):
+class DeepSeekFlashV3(DeepSeekChatV3):
     def __init__(self):
-        super().__init__(GLM_MODEL_NAME)
-
-
-class GLM4V3(GLMChatV3):
-    def __init__(self):
-        super().__init__('glm-4')
-
-
-class GLM3V3(GLMChatV3):
-    def __init__(self):
-        super().__init__('glm-3-turbo')
+        super().__init__("deepseek-v4-flash")

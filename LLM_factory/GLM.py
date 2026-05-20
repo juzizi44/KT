@@ -18,19 +18,21 @@ from tenacity import (
     wait_random_exponential,  # type: ignore
 )
 
-import httpx as _httpx
+from openai import OpenAI
 import os
 
-# 智谱配置（从环境变量读取）
-ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
-ZHIPU_BASE_URL = os.getenv("ZHIPU_BASE_URL", "https://openrouter.ai/api/v1")
-GLM_MODEL_NAME = os.getenv("GLM_MODEL_NAME", "z-ai/glm-4.7")
+# GLM 配置（通过 bianxie.ai 的 OpenAI 兼容接口调用）
+GLM_API_KEY = os.getenv("GLM_API_KEY", "")
+GLM_BASE_URL = os.getenv("GLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.bianxie.ai/v1"))
+GLM_MODEL_NAME = os.getenv("GLM_MODEL_NAME", "glm-4.7")
 
-if not ZHIPU_API_KEY:
-    raise ValueError("ZHIPU_API_KEY environment variable is not set")
+if not GLM_API_KEY:
+    raise ValueError("GLM_API_KEY environment variable is not set")
+
+glm_client = OpenAI(api_key=GLM_API_KEY, base_url=GLM_BASE_URL)
 
 
-@retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))
+@retry(wait=wait_random_exponential(min=60, max=180), stop=stop_after_attempt(6))
 def glm_chat(
     model: str,
     messages: List[Message],
@@ -38,34 +40,37 @@ def glm_chat(
     temperature: float = 0.2,
     num_comps=1,
 ) -> Union[List[str], str]:
-    print(f"  [GLM API] calling {model}, msgs={len(messages)}, max_tokens={max_tokens}", flush=True)
-    with _httpx.Client(timeout=60.0) as client:
-        resp = client.post(
-            f"{ZHIPU_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {ZHIPU_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [dataclasses.asdict(message) for message in messages],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
+    start_ts = time.time()
+    print(f"  [GLM API] -> model={model}, msgs={len(messages)}, max_tokens={max_tokens}", flush=True)
+    try:
+        response = glm_client.chat.completions.create(
+            model=model,
+            messages=[dataclasses.asdict(message) for message in messages],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=1,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            n=num_comps,
         )
-        resp.raise_for_status()
-        data = resp.json()
-    print(f"  [GLM API] response received, status={resp.status_code}", flush=True)
+    except Exception as exc:
+        elapsed = time.time() - start_ts
+        print(f"  [GLM API] !! request failed after {elapsed:.1f}s: {exc}", flush=True)
+        raise
+
+    elapsed = time.time() - start_ts
+    print(f"  [GLM API] <- done in {elapsed:.1f}s, choices={len(response.choices)}", flush=True)
 
     time.sleep(0.1)
-    choices = data["choices"]
+
     if num_comps == 1:
-        return choices[0]["message"]["content"]
-    return [c["message"]["content"] for c in choices]
+        return response.choices[0].message.content  # type: ignore
+
+    return [choice.message.content for choice in response.choices]  # type: ignore
 
 
 class GLMChat(LLMModelBase):
-    """智谱云端 API，支持所有 glm-* 模型（glm-4、glm-4.7、glm-3-turbo 等）。"""
+    """通过 bianxie.ai 的 OpenAI 兼容接口调用 glm 模型。"""
 
     def __init__(self, model_name: str):
         super().__init__(model_name)
@@ -170,5 +175,3 @@ class GLM4(GLMChat):
 class GLM3(GLMChat):
     def __init__(self):
         super().__init__("glm-3-turbo")
-
-# 本地 glm-3-6b（transformers）相关实现已移除；如需仅用 API，请使用 GLM47 / GLM4 / GLM3。

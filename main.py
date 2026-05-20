@@ -62,9 +62,8 @@ def get_args():
 
     # version settings
     parser.add_argument('--version', type=str, default='v1',
-                        help='Version of the pipeline: v1 (multi-turn), v2 (single-turn), or v3 (producer-critic-judge). '
+                        help='Version of the pipeline: v1 (multi-turn) or v3 (producer-critic-judge). '
                              'v1: Multiple API calls for analysis, prediction, explanation. '
-                             'v2: Single API call with structured output for all steps. '
                              'v3: Producer-critic-judge pipeline with a v1-style producer.')
 
     args = parser.parse_args()

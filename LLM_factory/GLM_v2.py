@@ -25,11 +25,15 @@ from tenacity import (
 )
 
 import httpx as _httpx
+import os
 
-# 智谱配置（通过 OpenRouter）
-ZHIPU_API_KEY = "***REMOVED***"
-ZHIPU_BASE_URL = "https://openrouter.ai/api/v1"
-GLM_MODEL_NAME = "z-ai/glm-4.7"
+# 智谱配置（从环境变量读取）
+ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
+ZHIPU_BASE_URL = os.getenv("ZHIPU_BASE_URL", "https://openrouter.ai/api/v1")
+GLM_MODEL_NAME = os.getenv("GLM_MODEL_NAME", "z-ai/glm-4.7")
+
+if not ZHIPU_API_KEY:
+    raise ValueError("ZHIPU_API_KEY environment variable is not set")
 
 
 @retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))

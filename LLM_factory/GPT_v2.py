@@ -27,9 +27,13 @@ import openai
 from openai import OpenAI
 import os
 
-# GPT API 配置
-os.environ["OPENAI_API_KEY"] = "***REMOVED***"
-os.environ["OPENAI_BASE_URL"] = "https://api.bianxie.ai/v1"
+# GPT API 配置（从环境变量读取）
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
+
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+os.environ["OPENAI_BASE_URL"] = os.getenv("OPENAI_BASE_URL", "https://api.bianxie.ai/v1")
 
 gpt_client = OpenAI()
 

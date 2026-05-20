@@ -1,9 +1,13 @@
 from .piplines import Pipeline
 from mylogger import Logger
 from LLM_factory.GLM import GLM47, GLM4, GLM3
+from LLM_factory.GLM_v2 import GLM47V2, GLM4V2, GLM3V2
+from LLM_factory.GLM_v3 import GLM47V3, GLM4V3, GLM3V3
 from LLM_factory.GPT import GPTChat, GPT4, GPT35
+from LLM_factory.GPT_v2 import GPTChatV2, GPT4V2, GPT35V2
+from LLM_factory.GPT_v3 import GPTChatV3, GPT4V3, GPT35V3
 from LLM_factory.model import LLMModelBase
-from evaluator_factory import LLMEvaluator
+from evaluator_factory import LLMEvaluator, LLMEvaluatorV2, LLMEvaluatorV3
 from utils import aggregate_data
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import datetime
@@ -39,6 +43,7 @@ class LLMPipeline(Pipeline):
                  dataset_name: str = None,
                  knowledge_graph_path: str = None,
                  max_workers: int = 4,
+                 version: str = 'v1',
                  ):
         self.model_name = model_name
         self.train_data = train_data
@@ -46,16 +51,12 @@ class LLMPipeline(Pipeline):
         self.extra_datas = extra_datas # list of pd
         self.logger = logger
         self.data_mode = data_mode
-        self.llm =self.init_llm(model_name)
+        self.version = version
+        self.llm = self.init_llm(model_name, version)
         self.fewshots_num = fewshots_num
         self.fewshots_strategy = fewshots_strategy
         self.eval_strategy = eval_strategy
-        self.evaluator = LLMEvaluator(
-            eval_strategy=eval_strategy,
-            logger=logger,
-            llm=self.llm,
-            skip_post_explain=skip_post_explain,
-        )
+        self.evaluator = self.init_evaluator(eval_strategy, logger, skip_post_explain)
         self.test_num = test_num
         self.random_seed = random_seed
         self.dataset_name = dataset_name
@@ -64,8 +65,25 @@ class LLMPipeline(Pipeline):
         self._results_lock = threading.Lock()
 
 
-    def init_llm(self, model_name):
-        # initialize llm（GLM 仅云端 API：glm-4、glm-3-turbo）
+    def init_llm(self, model_name, version='v1'):
+        """
+        Initialize LLM model.
+
+        Args:
+            model_name: Model name (e.g., 'glm-4.7', 'gpt-4')
+            version: 'v1' for multi-turn, 'v2' for single-turn
+
+        Returns:
+            LLM model instance
+        """
+        if version == 'v2':
+            return self._init_llm_v2(model_name)
+        if version == 'v3':
+            return self._init_llm_v3(model_name)
+        return self._init_llm_v1(model_name)
+
+    def _init_llm_v1(self, model_name):
+        """Initialize V1 LLM (multi-turn)."""
         if model_name.startswith("glm"):
             if model_name == "glm-4.7":
                 llm = GLM47()
@@ -74,7 +92,7 @@ class LLMPipeline(Pipeline):
             elif model_name == "glm-3-turbo":
                 llm = GLM3()
             else:
-                # 支持其他 glm 变体
+                from LLM_factory.GLM import GLMChat
                 llm = GLMChat(model_name)
         elif model_name.startswith('gpt'):
             if model_name == 'gpt-4' or model_name == 'gpt-4-1106-preview' or model_name == 'gpt-4-32k':
@@ -82,13 +100,84 @@ class LLMPipeline(Pipeline):
             elif model_name == 'gpt-3.5-turbo':
                 llm = GPT35()
             elif model_name.startswith('gpt-3.5-turbo'):
-                # allow other gpt-3.5 variants such as gpt-3.5-turbo-0125
                 llm = GPTChat(model_name)
             else:
                 raise ValueError(f"Invalid gpt model name: {model_name}")
         else:
             raise ValueError(f"Invalid model name: {model_name}")
         return llm
+
+    def _init_llm_v2(self, model_name):
+        """Initialize V2 LLM (single-turn)."""
+        if model_name.startswith("glm"):
+            if model_name == "glm-4.7":
+                llm = GLM47V2()
+            elif model_name == "glm-4":
+                llm = GLM4V2()
+            elif model_name == "glm-3-turbo":
+                llm = GLM3V2()
+            else:
+                from LLM_factory.GLM_v2 import GLMChatV2
+                llm = GLMChatV2(model_name)
+        elif model_name.startswith('gpt'):
+            if model_name == 'gpt-4' or model_name == 'gpt-4-1106-preview' or model_name == 'gpt-4-32k':
+                llm = GPT4V2()
+            elif model_name == 'gpt-3.5-turbo':
+                llm = GPT35V2()
+            elif model_name.startswith('gpt-3.5-turbo'):
+                llm = GPTChatV2(model_name)
+            else:
+                raise ValueError(f"Invalid gpt model name: {model_name}")
+        else:
+            raise ValueError(f"Invalid model name: {model_name}")
+        return llm
+
+    def _init_llm_v3(self, model_name):
+        """Initialize V3 LLM (producer-critic-judge)."""
+        if model_name.startswith('glm'):
+            if model_name == 'glm-4.7':
+                llm = GLM47V3()
+            elif model_name == 'glm-4':
+                llm = GLM4V3()
+            elif model_name == 'glm-3-turbo':
+                llm = GLM3V3()
+            else:
+                from LLM_factory.GLM_v3 import GLMChatV3
+                llm = GLMChatV3(model_name)
+        elif model_name.startswith('gpt'):
+            if model_name in ('gpt-4', 'gpt-4-1106-preview', 'gpt-4-32k'):
+                llm = GPT4V3()
+            elif model_name == 'gpt-3.5-turbo':
+                llm = GPT35V3()
+            elif model_name.startswith('gpt-3.5-turbo'):
+                llm = GPTChatV3(model_name)
+            else:
+                raise ValueError(f"Invalid gpt model name: {model_name}")
+        else:
+            raise ValueError(f"Invalid model name: {model_name}")
+        return llm
+
+    def init_evaluator(self, eval_strategy, logger, skip_post_explain):
+        """Initialize evaluator based on version."""
+        if self.version == 'v2':
+            return LLMEvaluatorV2(
+                eval_strategy=eval_strategy,
+                logger=logger,
+                llm=self.llm,
+            )
+        if self.version == 'v3':
+            return LLMEvaluatorV3(
+                eval_strategy=eval_strategy,
+                logger=logger,
+                llm=self.llm,
+                skip_post_explain=skip_post_explain,
+            )
+        return LLMEvaluator(
+            eval_strategy=eval_strategy,
+            logger=logger,
+            llm=self.llm,
+            skip_post_explain=skip_post_explain,
+        )
 
 
     def evaluate(self, train_data, test_data, data_mode, extra_datas, fewshots_num, fewshots_strategy, eval_strategy):

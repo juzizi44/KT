@@ -23,6 +23,8 @@ class Logger:
                 graph_config = filename.replace('.json', '')
 
         self.graph_config = graph_config
+        self.version = getattr(args, 'version', 'v1')
+        self.version_suffix = '_v3' if self.version == 'v3' else ''
 
         # Create log directory (now includes fewshot_strategy)
         log_dir = os.path.join(args.log_path, args.model_name, args.data_mode, args.fewshot_strategy, args.dataset_name)
@@ -41,15 +43,15 @@ class Logger:
 
         # Log file path (use consistent name for resume)
         self.log_file = os.path.join(log_dir,
-            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}.txt")
+            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}{self.version_suffix}.txt")
 
         # JSON result file path
         self.result_file = os.path.join(result_dir,
-            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}.json")
+            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}{self.version_suffix}.json")
 
         # Checkpoint file path
         self.checkpoint_file = os.path.join(result_dir,
-            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}_checkpoint.json")
+            f"{args.model_type}_{args.model_name}_fsn{args.fewshot_num}_fss{args.fewshot_strategy}{config_suffix}_es{args.eval_strategy}{self.version_suffix}_checkpoint.json")
 
         # Initialize or load existing results
         self.results: Dict[str, Any] = {}
@@ -174,6 +176,7 @@ class Logger:
                 "fewshot_num": self.args.fewshot_num,
                 "fewshot_strategy": self.args.fewshot_strategy,
                 "eval_strategy": self.args.eval_strategy,
+                "version": getattr(self.args, "version", None),
                 "test_num": self.args.test_num,
                 "knowledge_graph_config": self.graph_config,
             }

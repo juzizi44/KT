@@ -53,6 +53,13 @@ def get_args():
                         help='Short name for knowledge graph config (e.g., "correctness1.0_sequence0.0"). '
                              'Used in result filename. Auto-detected from knowledge_graph_path if not specified.')
 
+    # version settings
+    parser.add_argument('--version', type=str, default='v1',
+                        help='Version of the pipeline: v1 (multi-turn), v2 (single-turn), or v3 (producer-critic-judge). '
+                             'v1: Multiple API calls for analysis, prediction, explanation. '
+                             'v2: Single API call with structured output for all steps. '
+                             'v3: Producer-critic-judge pipeline with a v1-style producer.')
+
     args = parser.parse_args()
     return args
 
@@ -88,7 +95,7 @@ def main(args):
     else:
         raise ValueError("model type not in ['llm', 'ktm']")
 
-    print(f"[STEP 5] Initializing LLMPipeline (model={args.model_name})...", flush=True)
+    print(f"[STEP 5] Initializing LLMPipeline (model={args.model_name}, version={args.version})...", flush=True)
     # initial pipline
     llm_pipline = LLMPipeline(model_name=args.model_name,
                               train_data=train_data,
@@ -105,6 +112,7 @@ def main(args):
                               dataset_name=args.dataset_name,
                               knowledge_graph_path=args.knowledge_graph_path,
                               max_workers=args.workers,
+                              version=args.version,
                               )
     print(f"[STEP 6] Pipeline running...", flush=True)
     llm_pipline.run()

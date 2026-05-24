@@ -16,6 +16,7 @@ from LLM_factory.prompt_factory_v3 import (
 from LLM_factory.GLM import GLMChat, GLM4, GLM3
 from LLM_factory.GPT import GPTChat, GPT4, GPT35
 from LLM_factory.DeepSeek import DeepSeekChat, DeepSeekFlash
+from LLM_factory.Qwen import QwenChat
 
 
 def _model_family(model_name: str) -> str:
@@ -45,6 +46,9 @@ def _build_v1_llm(model_name: str) -> LLMModelBase:
         if model_name == 'deepseek-v4-flash':
             return DeepSeekFlash()
         return DeepSeekChat(model_name)
+    # qwen 模型：模型名是完整路径（如 .../Qwen2.5-32B-Instruct/）
+    if 'qwen' in model_name.lower():
+        return QwenChat(model_name)
     raise ValueError(f'Invalid model name: {model_name}')
 
 

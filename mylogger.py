@@ -29,12 +29,12 @@ class Logger:
         # Create log directory (now includes fewshot_strategy)
         log_dir = os.path.join(args.log_path, args.model_name, args.data_mode, args.fewshot_strategy, args.dataset_name)
         if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+            os.makedirs(log_dir, exist_ok=True)
 
         # Create result directory (now includes fewshot_strategy)
         result_dir = os.path.join(f"results_{self.version}", args.model_name, args.data_mode, args.fewshot_strategy, args.dataset_name)
         if not os.path.exists(result_dir):
-            os.makedirs(result_dir)
+            os.makedirs(result_dir, exist_ok=True)
 
         # Build filename suffix (include graph config for knowledge_graph strategy)
         config_suffix = ""

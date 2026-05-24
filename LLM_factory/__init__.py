@@ -6,4 +6,6 @@ from .GPT import GPTChat, GPT4, GPT35
 from .GPT_v3 import GPTChatV3, GPT4V3, GPT35V3
 from .DeepSeek import DeepSeekChat, DeepSeekFlash
 from .DeepSeek_v3 import DeepSeekChatV3, DeepSeekFlashV3
+from .Qwen import QwenChat, Qwen25_32B
+from .Qwen_v3 import QwenChatV3, Qwen25_32BV3
 from .model import LLMModelBase

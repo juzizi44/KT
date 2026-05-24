@@ -6,6 +6,8 @@ from LLM_factory.GPT import GPTChat, GPT4, GPT35
 from LLM_factory.GPT_v3 import GPTChatV3, GPT4V3, GPT35V3
 from LLM_factory.DeepSeek import DeepSeekChat, DeepSeekFlash
 from LLM_factory.DeepSeek_v3 import DeepSeekChatV3, DeepSeekFlashV3
+from LLM_factory.Qwen import QwenChat, Qwen25_32B
+from LLM_factory.Qwen_v3 import QwenChatV3, Qwen25_32BV3
 from LLM_factory.model import LLMModelBase
 from evaluator_factory import LLMEvaluator, LLMEvaluatorV3
 from utils import aggregate_data
@@ -106,6 +108,11 @@ class LLMPipeline(Pipeline):
                 llm = DeepSeekFlash()
             else:
                 llm = DeepSeekChat(model_name)
+        elif model_name.startswith('qwen'):
+            if model_name in ('qwen2.5-32b-instruct', 'Qwen2.5-32B-Instruct'):
+                llm = Qwen25_32B()
+            else:
+                llm = QwenChat(model_name)
         else:
             raise ValueError(f"Invalid model name: {model_name}")
         return llm
@@ -136,6 +143,11 @@ class LLMPipeline(Pipeline):
                 llm = DeepSeekFlashV3()
             else:
                 llm = DeepSeekChatV3(model_name)
+        elif model_name.startswith('qwen'):
+            if model_name in ('qwen2.5-32b-instruct', 'Qwen2.5-32B-Instruct'):
+                llm = Qwen25_32BV3()
+            else:
+                llm = QwenChatV3(model_name)
         else:
             raise ValueError(f"Invalid model name: {model_name}")
         return llm
